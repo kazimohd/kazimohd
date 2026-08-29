@@ -5,6 +5,10 @@ on:
     # 13:30 UTC = 7:00 PM Asia/Kolkata. A date gate below limits this to every two days.
     - cron: "30 13 * * *"
   workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/regulatory-deadline-monitor.yml"
 
 permissions:
   contents: write
