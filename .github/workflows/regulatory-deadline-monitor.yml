@@ -5,16 +5,10 @@ on:
     # 13:30 UTC = 7:00 PM Asia/Kolkata. A date gate below limits this to every two days.
     - cron: "30 13 * * *"
   workflow_dispatch:
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/workflows/regulatory-deadline-monitor.yml"
-      - "regulatory_monitor/monitor.py"
-      - "regulatory_monitor/fallback_monitor.py"
-      - "regulatory_monitor/requirements.txt"
 
 permissions:
   contents: write
+  pull-requests: write
   issues: write
 
 concurrency:
@@ -67,6 +61,17 @@ jobs:
         id: fallback
         run: python regulatory_monitor/fallback_monitor.py
 
+      - name: Save checked-notice baselines
+        if: steps.cadence.outputs.run == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add regulatory_monitor/state.json regulatory_monitor/fallback_state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update regulatory notice monitor state"
+            git push
+          fi
+
       - name: Notify only when a new matching notice is found
         if: steps.cadence.outputs.run == 'true' && (steps.monitor.outputs.has_alert == 'true' || steps.fallback.outputs.fallback_has_alert == 'true')
         env:
@@ -80,19 +85,23 @@ jobs:
             printf '\n' >> regulatory_monitor/combined_alert.md
             cat regulatory_monitor/fallback_alert.md >> regulatory_monitor/combined_alert.md
           fi
-          gh issue create \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Regulatory application/deadline alert - $(TZ=Asia/Kolkata date '+%d %b %Y')" \
-            --body-file regulatory_monitor/combined_alert.md \
-            --assignee kazimohd
 
-      - name: Save checked-notice baselines
-        if: steps.cadence.outputs.run == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add regulatory_monitor/state.json regulatory_monitor/fallback_state.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update regulatory notice monitor state"
-            git push
-          fi
+          stamp="$(TZ=Asia/Kolkata date '+%Y%m%d-%H%M%S')"
+          branch="regulatory-alert-$stamp"
+          alert_file="regulatory_monitor/alerts/$stamp.md"
+          mkdir -p regulatory_monitor/alerts
+          cp regulatory_monitor/combined_alert.md "$alert_file"
+
+          git checkout -b "$branch"
+          git add "$alert_file"
+          git commit -m "alert: new regulatory application notice"
+          git push origin "$branch"
+
+          pr_url=$(gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --title "Regulatory application/deadline alert - $(TZ=Asia/Kolkata date '+%d %b %Y')" \
+            --body-file regulatory_monitor/combined_alert.md)
+          gh pr edit "$pr_url" --add-reviewer kazimohd || true
+          echo "Alert pull request: $pr_url"
