@@ -5,6 +5,13 @@ on:
     # 13:30 UTC = 7:00 PM Asia/Kolkata. A date gate below limits this to every two days.
     - cron: "30 13 * * *"
   workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/regulatory-deadline-monitor.yml"
+      - "regulatory_monitor/monitor.py"
+      - "regulatory_monitor/fallback_monitor.py"
+      - "regulatory_monitor/requirements.txt"
 
 permissions:
   contents: write
@@ -97,11 +104,16 @@ jobs:
           git commit -m "alert: new regulatory application notice"
           git push origin "$branch"
 
-          pr_url=$(gh pr create \
+          if pr_url=$(gh pr create \
             --repo "$GITHUB_REPOSITORY" \
             --base main \
             --head "$branch" \
             --title "Regulatory application/deadline alert - $(TZ=Asia/Kolkata date '+%d %b %Y')" \
-            --body-file regulatory_monitor/combined_alert.md)
-          gh pr edit "$pr_url" --add-reviewer kazimohd || true
-          echo "Alert pull request: $pr_url"
+            --body-file regulatory_monitor/combined_alert.md); then
+            gh pr edit "$pr_url" --add-reviewer kazimohd || true
+            echo "Alert pull request: $pr_url"
+          else
+            cat regulatory_monitor/combined_alert.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=New regulatory announcement detected::Open this failed workflow run and review the alert summary."
+            exit 1
+          fi
