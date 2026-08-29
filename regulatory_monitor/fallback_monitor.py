@@ -26,6 +26,10 @@ SOURCES = [
     ("ncism", "National Commission for Indian System of Medicine", "ayurveda_pg", [
         "https://ncismindia.org/circular-notification.php",
         "https://www.ncismindia.org/circular-notification.php",
+        # Jina Reader is used only as a read-through copy of the official NCISM URL when
+        # NCISM's web firewall rejects a normal scheduled request with HTTP 409.
+        "https://r.jina.ai/http://www.ncismindia.org/circular-notification.php",
+        "https://r.jina.ai/https://www.ncismindia.org/circular-notification.php",
         "https://www.bing.com/search?format=rss&q=site%3Ancismindia.org+%28%22new+PG+courses%22+OR+%22open+new+PG%22+OR+%22increase+in+PG%22+OR+%22application%2Fscheme%22%29+Ayurveda",
     ]),
     ("ncahp", "National Commission for Allied and Healthcare Professions", "mpt", [
@@ -34,6 +38,7 @@ SOURCES = [
         "https://ncahp.krispsoft.com/draftregulations",
         "https://ncahp.krispsoft.com/draft-cariculam",
         "https://ahir.abdm.gov.in/",
+        "https://r.jina.ai/https://ahir.abdm.gov.in/",
         "https://www.bing.com/search?format=rss&q=%28site%3Ancahp.krispsoft.com+OR+site%3Aahir.abdm.gov.in+OR+site%3Ancahp.abdm.gov.in%29+%28physiotherapy+OR+MPT+OR+%22allied+and+healthcare%22%29+%28application+OR+recognition+OR+institution+OR+%22new+course%22%29",
     ]),
 ]
@@ -96,7 +101,7 @@ def relevant(key: str, profile: str, title: str) -> bool:
 
 
 def fetch(session: requests.Session, key: str, url: str) -> list[tuple[str, str]]:
-    response = session.get(url, timeout=35, verify=False, allow_redirects=True)
+    response = session.get(url, timeout=50, verify=False, allow_redirects=True)
     response.raise_for_status()
     text = response.text
     if len(text) < 120:
@@ -109,9 +114,26 @@ def fetch(session: requests.Session, key: str, url: str) -> list[tuple[str, str]
             desc = norm(item.findtext("description") or "")
             link = norm(item.findtext("link") or "")
             combined = norm(f"{title} {desc}")
-            if combined and official(key, link):
-                items.append((combined, link))
+            # The search query is hard-coded to the official domain. Prefer a direct official
+            # result URL; otherwise use the authority's official notices page for verification.
+            official_urls = re.findall(r"https?://(?:www\.)?(?:ncismindia\.org|ncahp\.krispsoft\.com|[^/]*\.abdm\.gov\.in)[^\s<>'\"]*", combined)
+            verify_url = official_urls[0].rstrip(".,);]") if official_urls else link
+            if combined:
+                items.append((combined, verify_url))
         return items
+
+    # Jina Reader returns Markdown/plain text copied from the official target page. Preserve
+    # the official target URL for alerts and fingerprints rather than the proxy URL.
+    is_reader = urlparse(response.url).hostname == "r.jina.ai"
+    official_target = ""
+    if is_reader:
+        match = re.search(r"https?://(?:www\.)?(?:ncismindia\.org|[^/]*\.abdm\.gov\.in)[^\s<>'\"]*", text)
+        if match:
+            official_target = match.group(0).rstrip(".,);]")
+        elif key == "ncism":
+            official_target = "https://www.ncismindia.org/circular-notification.php"
+        else:
+            official_target = "https://ahir.abdm.gov.in/"
 
     soup = BeautifulSoup(text, "html.parser")
     for a in soup.find_all("a"):
@@ -121,10 +143,11 @@ def fetch(session: requests.Session, key: str, url: str) -> list[tuple[str, str]
         if len(title) < 15 or low(title) in {"click here", "view", "view details", "read more", "download"}:
             title = parent_text or title
         link = urljoin(response.url, a.get("href", ""))
-        if title and official(key, link):
-            items.append((title, link))
+        if title and (is_reader or official(key, link)):
+            items.append((title, official_target or link))
     body = soup.get_text("\n", strip=True)
-    items.extend((norm(line), response.url) for line in body.splitlines() if 8 <= len(norm(line)) <= 700)
+    body_url = official_target or response.url
+    items.extend((norm(line), body_url) for line in body.splitlines() if 8 <= len(norm(line)) <= 700)
     return items
 
 
