@@ -54,28 +54,41 @@ jobs:
         if: steps.cadence.outputs.run == 'true'
         run: pip install -r regulatory_monitor/requirements.txt
 
-      - name: Check official regulator websites
+      - name: Check primary official sources
         if: steps.cadence.outputs.run == 'true'
         id: monitor
         run: python regulatory_monitor/monitor.py
 
+      - name: Check blocked-source official fallbacks
+        if: steps.cadence.outputs.run == 'true'
+        id: fallback
+        run: python regulatory_monitor/fallback_monitor.py
+
       - name: Notify only when a new matching notice is found
-        if: steps.cadence.outputs.run == 'true' && steps.monitor.outputs.has_alert == 'true'
+        if: steps.cadence.outputs.run == 'true' && (steps.monitor.outputs.has_alert == 'true' || steps.fallback.outputs.fallback_has_alert == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : > regulatory_monitor/combined_alert.md
+          if [[ -f regulatory_monitor/alert.md ]]; then
+            cat regulatory_monitor/alert.md >> regulatory_monitor/combined_alert.md
+          fi
+          if [[ -f regulatory_monitor/fallback_alert.md ]]; then
+            printf '\n' >> regulatory_monitor/combined_alert.md
+            cat regulatory_monitor/fallback_alert.md >> regulatory_monitor/combined_alert.md
+          fi
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "Regulatory application/deadline alert - $(TZ=Asia/Kolkata date '+%d %b %Y')" \
-            --body-file regulatory_monitor/alert.md \
+            --body-file regulatory_monitor/combined_alert.md \
             --assignee kazimohd
 
-      - name: Save checked-notice baseline
+      - name: Save checked-notice baselines
         if: steps.cadence.outputs.run == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add regulatory_monitor/state.json
+          git add regulatory_monitor/state.json regulatory_monitor/fallback_state.json
           if ! git diff --cached --quiet; then
             git commit -m "chore: update regulatory notice monitor state"
             git push
