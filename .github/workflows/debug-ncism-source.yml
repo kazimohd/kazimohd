@@ -12,39 +12,30 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 8
     steps:
-      - name: Inspect search-index fallbacks
+      - name: Inspect alternate official NCISM pages
         shell: bash
         run: |
           set +e
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36'
-
-          echo '=== BING RSS SIMPLE ==='
-          curl -L --max-time 45 -A "$UA" 'https://www.bing.com/search?format=rss&q=site%3Ancismindia.org+%22new+PG+courses%22+Ayurveda' -o /tmp/bing-simple.xml
-          echo "bytes=$(wc -c < /tmp/bing-simple.xml 2>/dev/null)"
-          grep -oE '<item>.*?</item>' /tmp/bing-simple.xml | head -20
-          grep -inE 'ncism|PG course|2026-27|2027-28' /tmp/bing-simple.xml | head -50
-
-          echo '=== BING HTML SIMPLE ==='
-          curl -L --max-time 45 -A "$UA" 'https://www.bing.com/search?q=site%3Ancismindia.org+%22new+PG+courses%22+Ayurveda&count=20' -o /tmp/bing.html
-          echo "bytes=$(wc -c < /tmp/bing.html 2>/dev/null)"
-          grep -ioE 'https?://[^" <]*ncismindia\.org[^" <]*' /tmp/bing.html | head -30
-          grep -inE 'new PG|PG course|2026-27|2027-28|ncismindia' /tmp/bing.html | head -30
-
-          echo '=== DUCKDUCKGO HTML ==='
-          curl -L --max-time 45 -A "$UA" -d 'q=site%3Ancismindia.org+%22new+PG+courses%22+Ayurveda' 'https://html.duckduckgo.com/html/' -o /tmp/ddg.html
-          echo "bytes=$(wc -c < /tmp/ddg.html 2>/dev/null)"
-          grep -ioE 'https?://[^" <]*ncismindia\.org[^" <]*' /tmp/ddg.html | head -30
-          grep -inE 'new PG|PG course|2026-27|2027-28|ncismindia' /tmp/ddg.html | head -30
-
-          echo '=== GOOGLE HTML ==='
-          curl -L --max-time 45 -A "$UA" 'https://www.google.com/search?q=site%3Ancismindia.org+%22new+PG+courses%22+Ayurveda&num=20' -o /tmp/google.html
-          echo "bytes=$(wc -c < /tmp/google.html 2>/dev/null)"
-          grep -ioE 'https?://[^" <]*ncismindia\.org[^" <]*' /tmp/google.html | head -30
-          grep -inE 'new PG|PG course|2026-27|2027-28|ncismindia' /tmp/google.html | head -30
-
-          echo '=== SEARCH-INDEX PAGE SNAPSHOT VIA JINA ==='
-          curl -L --max-time 45 -A "$UA" 'https://r.jina.ai/https://www.google.com/search?q=site%3Ancismindia.org+%22new+PG+courses%22+Ayurveda' -o /tmp/jina-google.txt
-          echo "bytes=$(wc -c < /tmp/jina-google.txt 2>/dev/null)"
-          grep -inE 'new PG|PG course|2026-27|2027-28|ncismindia' /tmp/jina-google.txt | head -60
+          urls=(
+            'https://ncismindia.org/index.php'
+            'https://ncismindia.org/archives.php'
+            'https://ncismindia.org/index.php/latestupdate/'
+            'https://ncismindia.org/index.php/electives.php'
+            'https://ncismindia.org/index.php/lib/tenders.php'
+            'https://ncismindia.org/index.php/latestupdate/Siddha%20college/Sowa%20Rigpa%20college/assets/pdf/List%20of%20Permitted%20Ayurveda%20Colleges%20for%20the%20Academic%20Year%202025-26%20as%20on%2025.06.2025.pdf'
+            'http://ncismindia.org/index.php'
+            'http://ncismindia.org/archives.php'
+          )
+          i=0
+          for url in "${urls[@]}"; do
+            i=$((i+1))
+            file="/tmp/ncism-$i.html"
+            echo "=== $url ==="
+            code=$(curl -L --connect-timeout 8 --max-time 25 -A "$UA" -sS -w '%{http_code}' "$url" -o "$file")
+            echo "http=$code bytes=$(wc -c < "$file" 2>/dev/null) final=$(curl -L --connect-timeout 5 --max-time 8 -A "$UA" -sS -o /dev/null -w '%{url_effective}' "$url")"
+            grep -inE 'new PG|PG course|post.?graduate|2026-27|2027-28|increase.*PG|Submission of application' "$file" | head -30
+            sed -n '1,5p' "$file"
+          done
