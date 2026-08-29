@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alert only on newly published institutional notices relevant to the user's proposals."""
+"""Alert only on newly published institutional notices relevant to monitored proposals."""
 from __future__ import annotations
 
 import hashlib
@@ -30,8 +30,10 @@ SOURCES = [
         "https://dciindia.gov.in/NewsSection.aspx?NewsType=Public+Notice",
     ]),
     ("ncism", "National Commission for Indian System of Medicine", "ayurveda_pg", [
+        "https://ncismindia.org/circular-notification.php",
+        "https://ncismindia.org/archives.php",
+        "https://ncismindia.org/index.php",
         "https://www.ncismindia.org/circular-notification.php",
-        "https://www.ncismindia.org/",
     ]),
     ("inc", "Indian Nursing Council", "nursing", [
         "https://www.indiannursingcouncil.org/special-attention",
@@ -82,8 +84,14 @@ EXCLUDE = (
     "प्रवेश वेळापत्रक", "गुणवत्ता यादी", "परीक्षा केंद्र", "निकाल", "भरती", "पुरस्कार",
 )
 PROGRAM = {
-    "mbbs": ("mbbs", "medical college", "undergraduate medical", "ug medical", "वैद्यकीय महाविद्यालय", "एमबीबीएस"),
-    "bds": ("bds", "dental college", "dental institution", "दंत महाविद्यालय", "बीडीएस"),
+    "mbbs": (
+        "mbbs", "medical college", "undergraduate medical", "ug medical",
+        "वैद्यकीय महाविद्यालय", "एमबीबीएस", "एम.बी.बी.एस",
+    ),
+    "bds": (
+        "bds", "dental college", "dental institution", "दंत महाविद्यालय",
+        "बीडीएस", "बी.डी.एस",
+    ),
     "ayurveda_pg": (
         "new pg course", "new postgraduate course", "open new pg", "opening of new pg",
         "higher course", "pg course", "post graduate course", "postgraduate course",
@@ -97,11 +105,20 @@ PROGRAM = {
     ),
     "mpt": (
         "physiotherapy", "physical therapy", "mpt", "m.p.t", "allied health",
-        "allied and healthcare", "भौतिकोपचार", "फिजिओथेरपी", "एमपीटी",
+        "allied and healthcare", "भौतिकोपचार", "फिजिओथेरपी", "एमपीटी", "एम.पी.टी",
     ),
 }
 PROGRAM["all"] = tuple(dict.fromkeys(sum(PROGRAM.values(), ())))
-CONTEXT_PROGRAM = {"inc", "mnc", "ncahp", "msotpt"}
+PROGRAM_CONTEXT = {"inc", "mnc", "ncahp", "msotpt"}
+GENERAL_HEALTH_AUTHORITIES = {"muhs", "medd", "dmer"}
+GENERAL_INSTITUTIONAL = (
+    "section 64", "कलम 64", "कलम ६४", "new college", "new institution", "new course",
+    "higher course", "increase in seats", "increase of seats", "intake capacity",
+    "proposal", "scheme", "consent of affiliation", "first time affiliation",
+    "essentiality certificate", "no objection certificate", "प्रस्ताव", "योजना",
+    "नवीन महाविद्यालय", "नवीन संस्था", "नवीन अभ्यासक्रम", "प्रवेश क्षमता",
+    "संलग्नता", "ना हरकत",
+)
 GENERIC_LINK = {"view", "view details", "details", "read more", "download", "click here", "more"}
 
 
@@ -120,13 +137,17 @@ def any_term(text: str, terms: tuple[str, ...]) -> bool:
 
 def relevant(key: str, profile: str, title: str) -> bool:
     text = low(title)
-    if not 8 <= len(text) <= 700 or not any_term(text, ACTION):
+    if not 8 <= len(text) <= 800 or not any_term(text, ACTION):
         return False
+
     has_program = any_term(text, PROGRAM[profile])
-    if key in CONTEXT_PROGRAM:
+    if key in PROGRAM_CONTEXT:
+        has_program = True
+    if key in GENERAL_HEALTH_AUTHORITIES and any_term(text, GENERAL_INSTITUTIONAL):
         has_program = True
     if not has_program:
         return False
+
     if any_term(text, EXCLUDE):
         strong = (
             "establishment", "new college", "new institution", "new course", "higher course",
@@ -136,6 +157,9 @@ def relevant(key: str, profile: str, title: str) -> bool:
         )
         if not any_term(text, strong):
             return False
+
+    # The Ayurveda case is opening PG courses in an existing college. A notice only about
+    # establishing a new undergraduate Ayurveda college must not trigger an alert.
     return profile != "ayurveda_pg" or any_term(text, PROGRAM["ayurveda_pg"])
 
 
@@ -147,29 +171,61 @@ def clean_url(base: str, href: str) -> str:
     return absolute if urlparse(absolute).scheme in {"http", "https"} else ""
 
 
-def fetch(session: requests.Session, url: str) -> list[tuple[str, str]]:
-    response = session.get(url, timeout=50, verify=False, allow_redirects=True)
+def request_official_page(session: requests.Session, url: str) -> requests.Response:
+    """Fetch an official page, satisfying NCISM's simple JavaScript cookie challenge."""
+    response = session.get(url, timeout=(8, 30), verify=False, allow_redirects=True)
+
+    if response.status_code == 409 and "document.cookie" in response.text:
+        matches = re.findall(
+            r"document\.cookie\s*=\s*[\"']([^=;\"']+)=([^;\"']+)",
+            response.text,
+            flags=re.IGNORECASE,
+        )
+        if not matches and "humans_21909" in response.text:
+            matches = [("humans_21909", "1")]
+
+        host = urlparse(response.url).hostname or urlparse(url).hostname or ""
+        for name, value in matches:
+            session.cookies.set(name.strip(), value.strip(), domain=host, path="/")
+        if matches:
+            response = session.get(
+                url,
+                timeout=(8, 30),
+                verify=False,
+                allow_redirects=True,
+                headers={"Referer": response.url},
+            )
+
     response.raise_for_status()
+    if "document.cookie" in response.text and "location.reload" in response.text:
+        raise RuntimeError("official page cookie challenge was not satisfied")
+    return response
+
+
+def fetch(session: requests.Session, url: str) -> list[tuple[str, str]]:
+    response = request_official_page(session, url)
     if len(response.text) < 150:
         raise RuntimeError("official page returned insufficient content")
+
     soup = BeautifulSoup(response.text, "html.parser")
     items: list[tuple[str, str]] = []
-    for a in soup.find_all("a"):
-        title = norm(a.get_text(" ", strip=True))
-        parent = a.find_parent(["tr", "li", "article", "section", "div"])
+    for anchor in soup.find_all("a"):
+        title = norm(anchor.get_text(" ", strip=True))
+        parent = anchor.find_parent(["tr", "li", "article", "section", "div"])
         parent_text = norm(parent.get_text(" ", strip=True)) if parent else ""
         if low(title) in GENERIC_LINK or len(title) < 12:
             title = parent_text or title
-        elif parent_text and len(parent_text) <= 650 and title.casefold() not in parent_text.casefold():
+        elif parent_text and len(parent_text) <= 700 and title.casefold() not in parent_text.casefold():
             title = f"{title} {parent_text}"
         if title:
-            items.append((title, clean_url(response.url, a.get("href", ""))))
+            items.append((title, clean_url(response.url, anchor.get("href", ""))))
+
     body = soup.get_text("\n", strip=True)
-    items.extend((norm(line), "") for line in body.splitlines() if 8 <= len(norm(line)) <= 500)
+    items.extend((norm(line), "") for line in body.splitlines() if 8 <= len(norm(line)) <= 600)
     return items
 
 
-def fp(key: str, title: str, url: str) -> str:
+def fingerprint(key: str, title: str, url: str) -> str:
     return hashlib.sha256(f"{key}\n{low(title)}\n{url}".encode()).hexdigest()[:24]
 
 
@@ -197,30 +253,38 @@ def main() -> int:
     ALERT.unlink(missing_ok=True)
     state = load_state()
     session = requests.Session()
-    session.headers["User-Agent"] = "Mozilla/5.0 (compatible; HealthEducationNoticeMonitor/1.0)"
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-IN,en;q=0.9",
+    })
+
     new: list[dict[str, str]] = []
-    successes = 0
+    successful_sources = 0
     now = datetime.now().astimezone()
 
     for key, name, profile, urls in SOURCES:
         raw: list[tuple[str, str]] = []
-        errors = []
+        errors: list[str] = []
         for url in urls:
             try:
                 raw.extend(fetch(session, url))
             except Exception as exc:
                 errors.append(f"{url}: {type(exc).__name__}: {exc}")
+
         if not raw:
             print(f"WARNING: {name} could not be checked")
             for error in errors:
                 print(f"  {error}")
             continue
-        successes += 1
+
+        successful_sources += 1
         found: dict[str, dict[str, str]] = {}
         for title, url in raw:
             if relevant(key, profile, title):
-                ident = fp(key, title, url)
+                ident = fingerprint(key, title, url)
                 found.setdefault(ident, {"fingerprint": ident, "title": title, "url": url})
+
         previous = set(state["seen"].get(key, []))
         if state["initialized"].get(key):
             for ident, item in found.items():
@@ -229,14 +293,16 @@ def main() -> int:
         else:
             state["initialized"][key] = True
             print(f"BASELINE: {name}: {len(found)} matching item(s)")
+
         state["seen"][key] = list(dict.fromkeys([*previous, *found.keys()]))[-3000:]
         state["last_checked"][key] = now.isoformat()
         print(f"CHECKED: {name}: {len(found)} matching, {len(set(found) - previous) if previous else 0} new")
 
-    if not successes:
+    if not successful_sources:
         output("has_alert", "false")
         print("No official source could be reached; state not saved.", file=sys.stderr)
         return 1
+
     STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     if new:
