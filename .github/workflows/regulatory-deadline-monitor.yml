@@ -9,6 +9,9 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/regulatory-deadline-monitor.yml"
+      - "regulatory_monitor/monitor.py"
+      - "regulatory_monitor/fallback_monitor.py"
+      - "regulatory_monitor/requirements.txt"
 
 permissions:
   contents: write
