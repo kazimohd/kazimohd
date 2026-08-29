@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fallback checks for official sources that block standard automated requests."""
+"""Official NCAHP fallback for pages that may block the primary monitor."""
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +8,6 @@ import os
 import re
 import sys
 import unicodedata
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -22,55 +21,42 @@ ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "fallback_state.json"
 ALERT = ROOT / "fallback_alert.md"
 
-SOURCES = [
-    ("ncism", "National Commission for Indian System of Medicine", "ayurveda_pg", [
-        "https://ncismindia.org/circular-notification.php",
-        "https://www.ncismindia.org/circular-notification.php",
-        # Jina Reader is used only as a read-through copy of the official NCISM URL when
-        # NCISM's web firewall rejects a normal scheduled request with HTTP 409.
-        "https://r.jina.ai/http://www.ncismindia.org/circular-notification.php",
-        "https://r.jina.ai/https://www.ncismindia.org/circular-notification.php",
-        "https://www.bing.com/search?format=rss&q=site%3Ancismindia.org+%28%22new+PG+courses%22+OR+%22open+new+PG%22+OR+%22increase+in+PG%22+OR+%22application%2Fscheme%22%29+Ayurveda",
-    ]),
-    ("ncahp", "National Commission for Allied and Healthcare Professions", "mpt", [
-        "https://ncahp.krispsoft.com/",
-        "https://ncahp.krispsoft.com/act-rules--notifications",
-        "https://ncahp.krispsoft.com/draftregulations",
-        "https://ncahp.krispsoft.com/draft-cariculam",
-        "https://ahir.abdm.gov.in/",
-        "https://r.jina.ai/https://ahir.abdm.gov.in/",
-        "https://www.bing.com/search?format=rss&q=%28site%3Ancahp.krispsoft.com+OR+site%3Aahir.abdm.gov.in+OR+site%3Ancahp.abdm.gov.in%29+%28physiotherapy+OR+MPT+OR+%22allied+and+healthcare%22%29+%28application+OR+recognition+OR+institution+OR+%22new+course%22%29",
-    ]),
-]
+SOURCE_KEY = "ncahp"
+SOURCE_NAME = "National Commission for Allied and Healthcare Professions"
+OFFICIAL_URLS = (
+    "https://ncahp.krispsoft.com/",
+    "https://ncahp.krispsoft.com/act-rules--notifications",
+    "https://ncahp.krispsoft.com/draftregulations",
+    "https://ncahp.krispsoft.com/draft-cariculam",
+    "https://ahir.abdm.gov.in/",
+)
+OFFICIAL_DOMAINS = ("ncahp.krispsoft.com", "abdm.gov.in", "mohfw.gov.in")
 
 ACTION = (
     "application", "apply", "scheme", "proposal", "establishment", "establish",
     "new institution", "new college", "new course", "higher course", "opening of",
     "increase in intake", "increase in seats", "increase of seats", "intake capacity",
     "recognition", "permission", "affiliation", "last date", "deadline", "extension",
-    "extended", "corrigendum", "regulations for recognition", "institutional standards",
+    "extended", "corrigendum", "institutional standards", "institutional registration",
     "अर्ज", "प्रस्ताव", "योजना", "स्थापना", "नवीन संस्था", "नवीन महाविद्यालय",
     "नवीन अभ्यासक्रम", "प्रवेश क्षमता", "मान्यता", "परवानगी", "संलग्नता", "मुदतवाढ",
 )
-EXCLUDE = (
-    "recruitment", "vacancy", "empanelment of advocate", "member selection", "counselling",
-    "admission schedule", "neet", "student", "professional conduct", "ethics", "enrolment portal",
-    "public comments", "draft curriculum", "समुपदेशन", "भरती", "पदभरती", "विद्यार्थी",
-)
-PG = (
-    "new pg course", "new postgraduate course", "open new pg", "opening of new pg",
-    "higher course", "pg course", "post graduate course", "postgraduate course",
-    "increase in pg", "increase of pg", "md (ayu", "ms (ayu", "m.d. (ayu", "m.s. (ayu",
-    "आयुर्वेद पदव्युत्तर", "पदव्युत्तर अभ्यासक्रम", "नवीन पीजी",
-)
-MPT = (
+PROGRAM = (
     "physiotherapy", "physical therapy", "mpt", "m.p.t", "allied health",
-    "allied and healthcare", "allied & healthcare", "भौतिकोपचार", "फिजिओथेरपी", "एमपीटी",
+    "allied and healthcare", "allied & healthcare", "healthcare institution",
+    "healthcare professional institution", "भौतिकोपचार", "फिजिओथेरपी", "एमपीटी",
 )
-ALLOWED = {
-    "ncism": ("ncismindia.org",),
-    "ncahp": ("ncahp.krispsoft.com", "abdm.gov.in", "mohfw.gov.in"),
-}
+INSTITUTIONAL = (
+    "institution", "college", "course", "programme", "program", "recognition",
+    "application", "registration of institution", "institutional registration",
+)
+EXCLUDE = (
+    "recruitment", "vacancy", "empanelment of advocate", "member selection",
+    "counselling", "admission schedule", "neet", "student", "professional conduct",
+    "ethics", "individual enrolment", "public comments", "draft curriculum",
+    "समुपदेशन", "भरती", "पदभरती", "विद्यार्थी",
+)
+GENERIC = {"view", "view details", "details", "read more", "download", "click here", "more"}
 
 
 def norm(value: str) -> str:
@@ -86,84 +72,56 @@ def has(text: str, terms: tuple[str, ...]) -> bool:
     return any(term.casefold() in text for term in terms)
 
 
-def official(key: str, url: str) -> bool:
-    host = urlparse(url).hostname or ""
-    return not url or any(host == domain or host.endswith("." + domain) for domain in ALLOWED[key])
+def official(url: str) -> bool:
+    host = (urlparse(url).hostname or "").casefold()
+    return any(host == domain or host.endswith("." + domain) for domain in OFFICIAL_DOMAINS)
 
 
-def relevant(key: str, profile: str, title: str) -> bool:
+def relevant(title: str) -> bool:
     text = low(title)
-    if not 8 <= len(text) <= 900 or not has(text, ACTION) or has(text, EXCLUDE):
+    if not 8 <= len(text) <= 800:
         return False
-    if profile == "ayurveda_pg":
-        return has(text, PG)
-    return has(text, MPT) or has(text, ("institution", "course", "recognition", "application"))
+    if not has(text, ACTION) or has(text, EXCLUDE):
+        return False
+    # A physiotherapy/MPT-specific notice is relevant. A common NCAHP institutional
+    # application or recognition notice is also relevant because it may govern MPT colleges.
+    return has(text, PROGRAM) or has(text, INSTITUTIONAL)
 
 
-def fetch(session: requests.Session, key: str, url: str) -> list[tuple[str, str]]:
-    response = session.get(url, timeout=50, verify=False, allow_redirects=True)
+def fetch(session: requests.Session, url: str) -> list[tuple[str, str]]:
+    response = session.get(url, timeout=(10, 35), verify=False, allow_redirects=True)
     response.raise_for_status()
-    text = response.text
-    if len(text) < 120:
-        raise RuntimeError("source returned insufficient content")
+    if len(response.text) < 150:
+        raise RuntimeError("official page returned insufficient content")
+    soup = BeautifulSoup(response.text, "html.parser")
     items: list[tuple[str, str]] = []
-    if "<rss" in text[:1000].casefold():
-        root = ET.fromstring(text)
-        for item in root.findall(".//item"):
-            title = norm(item.findtext("title") or "")
-            desc = norm(item.findtext("description") or "")
-            link = norm(item.findtext("link") or "")
-            combined = norm(f"{title} {desc}")
-            # The search query is hard-coded to the official domain. Prefer a direct official
-            # result URL; otherwise use the authority's official notices page for verification.
-            official_urls = re.findall(r"https?://(?:www\.)?(?:ncismindia\.org|ncahp\.krispsoft\.com|[^/]*\.abdm\.gov\.in)[^\s<>'\"]*", combined)
-            verify_url = official_urls[0].rstrip(".,);]") if official_urls else link
-            if combined:
-                items.append((combined, verify_url))
-        return items
-
-    # Jina Reader returns Markdown/plain text copied from the official target page. Preserve
-    # the official target URL for alerts and fingerprints rather than the proxy URL.
-    is_reader = urlparse(response.url).hostname == "r.jina.ai"
-    official_target = ""
-    if is_reader:
-        match = re.search(r"https?://(?:www\.)?(?:ncismindia\.org|[^/]*\.abdm\.gov\.in)[^\s<>'\"]*", text)
-        if match:
-            official_target = match.group(0).rstrip(".,);]")
-        elif key == "ncism":
-            official_target = "https://www.ncismindia.org/circular-notification.php"
-        else:
-            official_target = "https://ahir.abdm.gov.in/"
-
-    soup = BeautifulSoup(text, "html.parser")
-    for a in soup.find_all("a"):
-        title = norm(a.get_text(" ", strip=True))
-        parent = a.find_parent(["tr", "li", "article", "section", "div"])
+    for anchor in soup.find_all("a"):
+        title = norm(anchor.get_text(" ", strip=True))
+        parent = anchor.find_parent(["tr", "li", "article", "section", "div"])
         parent_text = norm(parent.get_text(" ", strip=True)) if parent else ""
-        if len(title) < 15 or low(title) in {"click here", "view", "view details", "read more", "download"}:
+        if low(title) in GENERIC or len(title) < 12:
             title = parent_text or title
-        link = urljoin(response.url, a.get("href", ""))
-        if title and (is_reader or official(key, link)):
-            items.append((title, official_target or link))
+        link = urljoin(response.url, anchor.get("href", ""))
+        if title and official(link):
+            items.append((title, link))
     body = soup.get_text("\n", strip=True)
-    body_url = official_target or response.url
-    items.extend((norm(line), body_url) for line in body.splitlines() if 8 <= len(norm(line)) <= 700)
+    items.extend((norm(line), response.url) for line in body.splitlines() if 8 <= len(norm(line)) <= 600)
     return items
 
 
-def fingerprint(key: str, title: str, url: str) -> str:
-    return hashlib.sha256(f"{key}\n{low(title)}\n{url}".encode()).hexdigest()[:24]
+def fingerprint(title: str, url: str) -> str:
+    return hashlib.sha256(f"{SOURCE_KEY}\n{low(title)}\n{url}".encode()).hexdigest()[:24]
 
 
 def load_state() -> dict:
     try:
-        state = json.loads(STATE.read_text(encoding="utf-8"))
+        data = json.loads(STATE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        state = {}
-    state.setdefault("initialized", {})
-    state.setdefault("seen", {})
-    state.setdefault("last_checked", {})
-    return state
+        data = {}
+    data.setdefault("initialized", {})
+    data.setdefault("seen", {})
+    data.setdefault("last_checked", {})
+    return data
 
 
 def output(name: str, value: str) -> None:
@@ -180,63 +138,60 @@ def main() -> int:
     state = load_state()
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (compatible; HealthEducationNoticeMonitor/1.0)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-IN,en;q=0.9",
     })
-    now = datetime.now().astimezone()
-    new: list[dict[str, str]] = []
-    successes = 0
 
-    for key, name, profile, urls in SOURCES:
-        raw: list[tuple[str, str]] = []
-        errors = []
-        for url in urls:
-            try:
-                raw.extend(fetch(session, key, url))
-            except Exception as exc:
-                errors.append(f"{url}: {type(exc).__name__}: {exc}")
-        if not raw:
-            print(f"WARNING: {name} fallback could not be checked")
-            for error in errors:
-                print(f"  {error}")
-            continue
-        successes += 1
-        found: dict[str, dict[str, str]] = {}
-        for title, url in raw:
-            if relevant(key, profile, title):
-                ident = fingerprint(key, title, url)
-                found.setdefault(ident, {"title": title, "url": url})
-        previous = set(state["seen"].get(key, []))
-        if state["initialized"].get(key):
-            for ident, item in found.items():
-                if ident not in previous:
-                    new.append({**item, "source": name})
-        else:
-            state["initialized"][key] = True
-            print(f"FALLBACK BASELINE: {name}: {len(found)} matching item(s)")
-        state["seen"][key] = list(dict.fromkeys([*previous, *found.keys()]))[-1500:]
-        state["last_checked"][key] = now.isoformat()
-        print(f"FALLBACK CHECKED: {name}: {len(found)} matching")
+    raw: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for url in OFFICIAL_URLS:
+        try:
+            raw.extend(fetch(session, url))
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {exc}")
 
-    if not successes:
+    if not raw:
         output("fallback_has_alert", "false")
-        print("No fallback source could be reached; state not saved.", file=sys.stderr)
+        print(f"WARNING: {SOURCE_NAME} fallback could not be checked", file=sys.stderr)
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
         return 1
+
+    found: dict[str, dict[str, str]] = {}
+    for title, url in raw:
+        if relevant(title):
+            ident = fingerprint(title, url)
+            found.setdefault(ident, {"title": title, "url": url})
+
+    now = datetime.now().astimezone()
+    previous = set(state["seen"].get(SOURCE_KEY, []))
+    new: list[dict[str, str]] = []
+    if state["initialized"].get(SOURCE_KEY):
+        for ident, item in found.items():
+            if ident not in previous:
+                new.append(item)
+    else:
+        state["initialized"][SOURCE_KEY] = True
+        print(f"FALLBACK BASELINE: {SOURCE_NAME}: {len(found)} matching item(s)")
+
+    state["seen"][SOURCE_KEY] = list(dict.fromkeys([*previous, *found.keys()]))[-1500:]
+    state["last_checked"][SOURCE_KEY] = now.isoformat()
     STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"FALLBACK CHECKED: {SOURCE_NAME}: {len(found)} matching, {len(new)} new")
 
     if new:
-        lines = ["## New official notice found through a blocked-site fallback", ""]
+        lines = ["## New NCAHP institutional notice detected", ""]
         for item in new:
             title, url = item["title"], item["url"]
             lines.append(f"### [{title}]({url})" if url else f"### {title}")
-            lines.extend((f"- **Official authority:** {item['source']}", ""))
+            lines.extend((f"- **Official authority:** {SOURCE_NAME}", ""))
         lines.append("Verify the original notice, academic year, deadline, fee, documents and any later corrigendum before filing.")
         ALERT.write_text("\n".join(lines) + "\n", encoding="utf-8")
         output("fallback_has_alert", "true")
     else:
         output("fallback_has_alert", "false")
-        print("No new relevant fallback announcement.")
+        print("No new relevant NCAHP announcement.")
     return 0
 
 
