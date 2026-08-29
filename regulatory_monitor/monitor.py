@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Alert only on newly published institutional notices relevant to the user's proposals."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sys
+import unicodedata
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+import requests
+import urllib3
+from bs4 import BeautifulSoup
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ROOT = Path(__file__).resolve().parent
+STATE = ROOT / "state.json"
+ALERT = ROOT / "alert.md"
+
+SOURCES = [
+    ("nmc", "National Medical Commission", "mbbs", [
+        "https://www.nmc.org.in/all-news/",
+        "https://www.nmc.org.in/online-application-submit/",
+    ]),
+    ("ndc", "National Dental Commission", "bds", [
+        "https://dciindia.gov.in/NewsSection.aspx?NewsType=Public+Notice",
+    ]),
+    ("ncism", "National Commission for Indian System of Medicine", "ayurveda_pg", [
+        "https://www.ncismindia.org/circular-notification.php",
+        "https://www.ncismindia.org/",
+    ]),
+    ("inc", "Indian Nursing Council", "nursing", [
+        "https://www.indiannursingcouncil.org/special-attention",
+        "https://www.indiannursingcouncil.org/online-application-forms",
+    ]),
+    ("ncahp", "National Commission for Allied and Healthcare Professions", "mpt", [
+        "https://ahir.abdm.gov.in/",
+        "https://ahir.abdm.gov.in/about-ncahp",
+    ]),
+    ("muhs", "Maharashtra University of Health Sciences", "all", [
+        "https://muhs.ac.in/", "https://www.muhs.ac.in/",
+    ]),
+    ("medd", "Maharashtra Medical Education and Drugs Department", "all", [
+        "https://medical.maharashtra.gov.in/",
+    ]),
+    ("dmer", "Directorate of Medical Education and Research, Maharashtra", "all", [
+        "https://dmer.maharashtra.gov.in/english/",
+        "https://dmer.maharashtra.gov.in/",
+    ]),
+    ("mnc", "Maharashtra Nursing Council", "nursing", [
+        "https://maharashtranursingcouncil.org/notifications",
+    ]),
+    ("msotpt", "Maharashtra State OT/PT Council", "mpt", [
+        "https://www.mahaotandptcouncil.in/",
+    ]),
+]
+
+ACTION = (
+    "application", "apply", "scheme", "proposal", "establishment", "establish",
+    "new college", "new institution", "new course", "higher course", "opening of",
+    "increase in seats", "increase of seats", "increase intake", "intake capacity",
+    "enhancement of seats", "suitability", "recognition", "permission",
+    "essentiality certificate", "no objection certificate", "consent of affiliation",
+    "first time affiliation", "affiliation", "section 64", "last date", "deadline",
+    "submission window", "extension", "extended", "corrigendum", "online application",
+    "अर्ज", "आवेदन", "प्रस्ताव", "योजना", "स्थापना", "नवीन महाविद्यालय",
+    "नवीन संस्था", "नवीन अभ्यासक्रम", "उच्च अभ्यासक्रम", "जागांमध्ये वाढ",
+    "प्रवेश क्षमता", "मान्यता", "परवानगी", "ना हरकत", "संलग्नता",
+    "प्रथम वेळ संलग्नता", "कलम 64", "कलम ६४", "अंतिम मुदत", "मुदतवाढ",
+    "मुदत वाढ", "शिफारस", "अधिसूचना", "जाहीर सूचना",
+)
+EXCLUDE = (
+    "counselling", "counseling", "admission schedule", "choice filling", "merit list",
+    "seat matrix", "neet", "exam centre", "exam center", "student registration",
+    "hall ticket", "result", "award", "recruitment", "vacancy", "webinar", "campaign",
+    "appeal", "annual disclosure", "biometric", "anti-ragging", "internship", "faculty",
+    "stipend", "ph.d", "phd", "candidate", "scholarship", "समुपदेशन",
+    "प्रवेश वेळापत्रक", "गुणवत्ता यादी", "परीक्षा केंद्र", "निकाल", "भरती", "पुरस्कार",
+)
+PROGRAM = {
+    "mbbs": ("mbbs", "medical college", "undergraduate medical", "ug medical", "वैद्यकीय महाविद्यालय", "एमबीबीएस"),
+    "bds": ("bds", "dental college", "dental institution", "दंत महाविद्यालय", "बीडीएस"),
+    "ayurveda_pg": (
+        "new pg course", "new postgraduate course", "open new pg", "opening of new pg",
+        "higher course", "pg course", "post graduate course", "postgraduate course",
+        "increase in pg", "increase of pg", "md (ayu", "ms (ayu", "m.d. (ayu",
+        "m.s. (ayu", "आयुर्वेद पदव्युत्तर", "पदव्युत्तर अभ्यासक्रम", "नवीन पीजी",
+    ),
+    "nursing": (
+        "nursing", "m.sc nursing", "m.sc. nursing", "msc nursing", "post basic b.sc",
+        "post basic bsc", "p.b.b.sc", "p b b sc", "nursing programme", "nursing program",
+        "परिचर्या", "नर्सिंग", "suitability", "section 13", "section 14", "snrc",
+    ),
+    "mpt": (
+        "physiotherapy", "physical therapy", "mpt", "m.p.t", "allied health",
+        "allied and healthcare", "भौतिकोपचार", "फिजिओथेरपी", "एमपीटी",
+    ),
+}
+PROGRAM["all"] = tuple(dict.fromkeys(sum(PROGRAM.values(), ())))
+CONTEXT_PROGRAM = {"inc", "mnc", "ncahp", "msotpt"}
+GENERIC_LINK = {"view", "view details", "details", "read more", "download", "click here", "more"}
+
+
+def norm(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def low(value: str) -> str:
+    return norm(value).casefold()
+
+
+def any_term(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term.casefold() in text for term in terms)
+
+
+def relevant(key: str, profile: str, title: str) -> bool:
+    text = low(title)
+    if not 8 <= len(text) <= 700 or not any_term(text, ACTION):
+        return False
+    has_program = any_term(text, PROGRAM[profile])
+    if key in CONTEXT_PROGRAM:
+        has_program = True
+    if not has_program:
+        return False
+    if any_term(text, EXCLUDE):
+        strong = (
+            "establishment", "new college", "new institution", "new course", "higher course",
+            "increase in seats", "increase of seats", "scheme", "proposal", "suitability",
+            "permission", "affiliation", "essentiality", "extension", "नवीन महाविद्यालय",
+            "नवीन अभ्यासक्रम", "प्रस्ताव", "मान्यता", "परवानगी", "संलग्नता", "मुदतवाढ",
+        )
+        if not any_term(text, strong):
+            return False
+    return profile != "ayurveda_pg" or any_term(text, PROGRAM["ayurveda_pg"])
+
+
+def clean_url(base: str, href: str) -> str:
+    href = norm(href)
+    if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+        return ""
+    absolute = urljoin(base, href)
+    return absolute if urlparse(absolute).scheme in {"http", "https"} else ""
+
+
+def fetch(session: requests.Session, url: str) -> list[tuple[str, str]]:
+    response = session.get(url, timeout=50, verify=False, allow_redirects=True)
+    response.raise_for_status()
+    if len(response.text) < 150:
+        raise RuntimeError("official page returned insufficient content")
+    soup = BeautifulSoup(response.text, "html.parser")
+    items: list[tuple[str, str]] = []
+    for a in soup.find_all("a"):
+        title = norm(a.get_text(" ", strip=True))
+        parent = a.find_parent(["tr", "li", "article", "section", "div"])
+        parent_text = norm(parent.get_text(" ", strip=True)) if parent else ""
+        if low(title) in GENERIC_LINK or len(title) < 12:
+            title = parent_text or title
+        elif parent_text and len(parent_text) <= 650 and title.casefold() not in parent_text.casefold():
+            title = f"{title} {parent_text}"
+        if title:
+            items.append((title, clean_url(response.url, a.get("href", ""))))
+    body = soup.get_text("\n", strip=True)
+    items.extend((norm(line), "") for line in body.splitlines() if 8 <= len(norm(line)) <= 500)
+    return items
+
+
+def fp(key: str, title: str, url: str) -> str:
+    return hashlib.sha256(f"{key}\n{low(title)}\n{url}".encode()).hexdigest()[:24]
+
+
+def load_state() -> dict:
+    try:
+        data = json.loads(STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data.setdefault("initialized", {})
+    data.setdefault("seen", {})
+    data.setdefault("last_checked", {})
+    return data
+
+
+def output(name: str, value: str) -> None:
+    path = os.getenv("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{name}={value}\n")
+    else:
+        print(f"{name}={value}")
+
+
+def main() -> int:
+    ALERT.unlink(missing_ok=True)
+    state = load_state()
+    session = requests.Session()
+    session.headers["User-Agent"] = "Mozilla/5.0 (compatible; HealthEducationNoticeMonitor/1.0)"
+    new: list[dict[str, str]] = []
+    successes = 0
+    now = datetime.now().astimezone()
+
+    for key, name, profile, urls in SOURCES:
+        raw: list[tuple[str, str]] = []
+        errors = []
+        for url in urls:
+            try:
+                raw.extend(fetch(session, url))
+            except Exception as exc:
+                errors.append(f"{url}: {type(exc).__name__}: {exc}")
+        if not raw:
+            print(f"WARNING: {name} could not be checked")
+            for error in errors:
+                print(f"  {error}")
+            continue
+        successes += 1
+        found: dict[str, dict[str, str]] = {}
+        for title, url in raw:
+            if relevant(key, profile, title):
+                ident = fp(key, title, url)
+                found.setdefault(ident, {"fingerprint": ident, "title": title, "url": url})
+        previous = set(state["seen"].get(key, []))
+        if state["initialized"].get(key):
+            for ident, item in found.items():
+                if ident not in previous:
+                    new.append({**item, "source": name})
+        else:
+            state["initialized"][key] = True
+            print(f"BASELINE: {name}: {len(found)} matching item(s)")
+        state["seen"][key] = list(dict.fromkeys([*previous, *found.keys()]))[-3000:]
+        state["last_checked"][key] = now.isoformat()
+        print(f"CHECKED: {name}: {len(found)} matching, {len(set(found) - previous) if previous else 0} new")
+
+    if not successes:
+        output("has_alert", "false")
+        print("No official source could be reached; state not saved.", file=sys.stderr)
+        return 1
+    STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    if new:
+        lines = [
+            "## New official regulatory announcement detected", "",
+            f"**Checked:** {now.strftime('%d %B %Y, %I:%M %p %Z')}", "",
+        ]
+        for item in new:
+            title, url = item["title"], item["url"]
+            lines.append(f"### [{title}]({url})" if url else f"### {title}")
+            lines.extend((f"- **Official source:** {item['source']}", ""))
+        lines.extend((
+            "Open the official notice and verify the academic year, exact last date, fees, documents, portal, and any later corrigendum or extension before filing.",
+            "", "This alert contains only publicly issued regulatory information and no institutional case documents.",
+        ))
+        ALERT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        output("has_alert", "true")
+        output("alert_count", str(len(new)))
+    else:
+        output("has_alert", "false")
+        output("alert_count", "0")
+        print("No new relevant announcement.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
