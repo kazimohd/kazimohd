@@ -1,0 +1,38 @@
+name: Temporary NCISM source-format check
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/debug-ncism-source.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect read-through official page
+        shell: bash
+        run: |
+          set +e
+          echo '=== JINA HTTP COPY ==='
+          curl -L --max-time 55 -A 'Mozilla/5.0' 'https://r.jina.ai/http://www.ncismindia.org/circular-notification.php' -o /tmp/ncism-http.txt
+          echo "bytes=$(wc -c < /tmp/ncism-http.txt 2>/dev/null)"
+          sed -n '1,30p' /tmp/ncism-http.txt
+          echo '--- matching lines ---'
+          grep -inE 'new PG|PG course|post.?graduate|2026-27|2027-28|increase.*PG' /tmp/ncism-http.txt | head -80
+
+          echo '=== JINA HTTPS COPY ==='
+          curl -L --max-time 55 -A 'Mozilla/5.0' 'https://r.jina.ai/https://www.ncismindia.org/circular-notification.php' -o /tmp/ncism-https.txt
+          echo "bytes=$(wc -c < /tmp/ncism-https.txt 2>/dev/null)"
+          sed -n '1,30p' /tmp/ncism-https.txt
+          echo '--- matching lines ---'
+          grep -inE 'new PG|PG course|post.?graduate|2026-27|2027-28|increase.*PG' /tmp/ncism-https.txt | head -80
+
+          echo '=== BING RSS INDEX ==='
+          curl -L --max-time 55 -A 'Mozilla/5.0' 'https://www.bing.com/search?format=rss&q=site%3Ancismindia.org+%28%22new+PG+courses%22+OR+%22open+new+PG%22+OR+%22increase+in+PG%22+OR+%22application%2Fscheme%22%29+Ayurveda' -o /tmp/ncism-rss.xml
+          echo "bytes=$(wc -c < /tmp/ncism-rss.xml 2>/dev/null)"
+          sed -n '1,120p' /tmp/ncism-rss.xml
