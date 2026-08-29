@@ -1,14 +1,5 @@
 {
-  "initialized": {
-    "ncahp": true,
-    "ncism": true
-  },
-  "seen": {
-    "ncahp": [],
-    "ncism": []
-  },
-  "last_checked": {
-    "ncahp": "2026-08-29T11:11:53.880856+00:00",
-    "ncism": "2026-08-29T11:02:22.864383+00:00"
-  }
+  "initialized": {},
+  "seen": {},
+  "last_checked": {}
 }
