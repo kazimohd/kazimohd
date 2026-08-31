@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Official NCAHP fallback for pages that may block the primary monitor."""
+"""Official NCAHP fallback, including institutional deadline extensions and reopened portals."""
 from __future__ import annotations
 
 import hashlib
@@ -37,9 +37,24 @@ ACTION = (
     "new institution", "new college", "new course", "higher course", "opening of",
     "increase in intake", "increase in seats", "increase of seats", "intake capacity",
     "recognition", "permission", "affiliation", "last date", "deadline", "extension",
-    "extended", "corrigendum", "institutional standards", "institutional registration",
+    "extended", "corrigendum", "addendum", "reopening", "re-open", "revised date",
+    "revised schedule", "institutional standards", "institutional registration",
     "अर्ज", "प्रस्ताव", "योजना", "स्थापना", "नवीन संस्था", "नवीन महाविद्यालय",
     "नवीन अभ्यासक्रम", "प्रवेश क्षमता", "मान्यता", "परवानगी", "संलग्नता", "मुदतवाढ",
+)
+EXTENSION_TERMS = (
+    "extension of last date", "last date is extended", "last date has been extended",
+    "last date extended", "extended last date", "date extended", "deadline extended",
+    "extension of deadline", "extension of time", "time extension", "timeline extended",
+    "revised last date", "revised deadline", "revised date", "revised schedule",
+    "application date extended", "application window extended", "application window reopened",
+    "application window re-opened", "portal reopened", "portal re-opened",
+    "reopening of portal", "re-opening of portal", "with late fee", "late fee date",
+    "corrigendum", "addendum", "मुदतवाढ", "मुदत वाढ", "अंतिम मुदत वाढ",
+    "अंतिम दिनांक वाढ", "अर्जाची मुदत वाढ", "वाढीव मुदत",
+    "सुधारित अंतिम दिनांक", "सुधारित वेळापत्रक", "पोर्टल पुन्हा सुरू",
+    "अंतिम तिथि बढ़ाई", "समय सीमा बढ़ाई", "अवधि विस्तार",
+    "संशोधित अंतिम तिथि", "पोर्टल पुनः खोला",
 )
 PROGRAM = (
     "physiotherapy", "physical therapy", "mpt", "m.p.t", "allied health",
@@ -48,13 +63,15 @@ PROGRAM = (
 )
 INSTITUTIONAL = (
     "institution", "college", "course", "programme", "program", "recognition",
-    "application", "registration of institution", "institutional registration",
+    "application", "application form", "proposal", "permission", "affiliation",
+    "registration of institution", "institutional registration", "portal", "window",
 )
 EXCLUDE = (
     "recruitment", "vacancy", "empanelment of advocate", "member selection",
     "counselling", "admission schedule", "neet", "student", "professional conduct",
     "ethics", "individual enrolment", "public comments", "draft curriculum",
-    "समुपदेशन", "भरती", "पदभरती", "विद्यार्थी",
+    "examination", "result", "merit list", "choice filling",
+    "समुपदेशन", "भरती", "पदभरती", "विद्यार्थी", "निकाल",
 )
 GENERIC = {"view", "view details", "details", "read more", "download", "click here", "more"}
 
@@ -77,8 +94,20 @@ def official(url: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in OFFICIAL_DOMAINS)
 
 
+def extension_notice(title: str) -> bool:
+    text = low(title)
+    return (
+        8 <= len(text) <= 900
+        and has(text, EXTENSION_TERMS)
+        and not has(text, EXCLUDE)
+        and (has(text, PROGRAM) or has(text, INSTITUTIONAL))
+    )
+
+
 def relevant(title: str) -> bool:
     text = low(title)
+    if extension_notice(title):
+        return True
     if not 8 <= len(text) <= 800:
         return False
     if not has(text, ACTION) or has(text, EXCLUDE):
@@ -162,7 +191,12 @@ def main() -> int:
     for title, url in raw:
         if relevant(title):
             ident = fingerprint(title, url)
-            found.setdefault(ident, {"title": title, "url": url})
+            kind = (
+                "Deadline extension / reopening / corrigendum"
+                if extension_notice(title)
+                else "New application / permission notice"
+            )
+            found.setdefault(ident, {"title": title, "url": url, "kind": kind})
 
     now = datetime.now().astimezone()
     previous = set(state["seen"].get(SOURCE_KEY, []))
@@ -178,20 +212,34 @@ def main() -> int:
     state["seen"][SOURCE_KEY] = list(dict.fromkeys([*previous, *found.keys()]))[-1500:]
     state["last_checked"][SOURCE_KEY] = now.isoformat()
     STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"FALLBACK CHECKED: {SOURCE_NAME}: {len(found)} matching, {len(new)} new")
+    extension_count = sum(
+        1 for item in found.values()
+        if item["kind"] == "Deadline extension / reopening / corrigendum"
+    )
+    print(
+        f"FALLBACK CHECKED: {SOURCE_NAME}: {len(found)} matching "
+        f"({extension_count} extension/reopening), {len(new)} new"
+    )
 
     if new:
-        lines = ["## New NCAHP institutional notice detected", ""]
+        lines = ["## New NCAHP institutional notice or deadline extension detected", ""]
         for item in new:
             title, url = item["title"], item["url"]
             lines.append(f"### [{title}]({url})" if url else f"### {title}")
-            lines.extend((f"- **Official authority:** {SOURCE_NAME}", ""))
-        lines.append("Verify the original notice, academic year, deadline, fee, documents and any later corrigendum before filing.")
+            lines.extend((
+                f"- **Alert type:** {item['kind']}",
+                f"- **Official authority:** {SOURCE_NAME}",
+                "",
+            ))
+        lines.append(
+            "Verify the original notice, academic year, original and extended last dates, "
+            "late-fee period, fee, documents and any later corrigendum before filing."
+        )
         ALERT.write_text("\n".join(lines) + "\n", encoding="utf-8")
         output("fallback_has_alert", "true")
     else:
         output("fallback_has_alert", "false")
-        print("No new relevant NCAHP announcement.")
+        print("No new relevant NCAHP announcement or deadline extension.")
     return 0
 
 
