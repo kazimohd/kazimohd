@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alert only on newly published institutional notices relevant to monitored proposals."""
+"""Alert only on new institutional notices and filing-date extensions relevant to monitored proposals."""
 from __future__ import annotations
 
 import hashlib
@@ -69,12 +69,35 @@ ACTION = (
     "essentiality certificate", "no objection certificate", "consent of affiliation",
     "first time affiliation", "affiliation", "section 64", "last date", "deadline",
     "submission window", "extension", "extended", "corrigendum", "online application",
+    "reopening", "re-open", "revised date", "revised schedule", "addendum",
     "अर्ज", "आवेदन", "प्रस्ताव", "योजना", "स्थापना", "नवीन महाविद्यालय",
     "नवीन संस्था", "नवीन अभ्यासक्रम", "उच्च अभ्यासक्रम", "जागांमध्ये वाढ",
     "प्रवेश क्षमता", "मान्यता", "परवानगी", "ना हरकत", "संलग्नता",
     "प्रथम वेळ संलग्नता", "कलम 64", "कलम ६४", "अंतिम मुदत", "मुदतवाढ",
     "मुदत वाढ", "शिफारस", "अधिसूचना", "जाहीर सूचना",
 )
+
+# These phrases are checked independently from ordinary application notices. This catches
+# extensions, reopened portals, late-fee windows, corrigenda and revised filing schedules.
+EXTENSION_TERMS = (
+    "extension of last date", "last date is extended", "last date has been extended",
+    "last date extended", "extended last date", "date is extended", "date has been extended",
+    "date extended", "deadline extended", "extension of deadline", "extension of time",
+    "time extension", "extension of timeline", "timeline extended", "revised last date",
+    "revised deadline", "revised date", "revised timeline", "revised schedule",
+    "submission date extended", "application date extended", "application window extended",
+    "application window reopened", "application window re-opened", "portal reopened",
+    "portal re-opened", "reopening of portal", "re-opening of portal", "reopen the portal",
+    "with late fee", "late fee date", "late-fee date", "corrigendum", "addendum",
+    "मुदतवाढ", "मुदत वाढ", "अंतिम मुदत वाढ", "अंतिम दिनांक वाढ",
+    "अर्जाची मुदत वाढ", "अर्ज सादर करण्याची मुदत", "वाढीव मुदत",
+    "सुधारित अंतिम दिनांक", "सुधारित अंतिम मुदत", "सुधारित वेळापत्रक",
+    "पोर्टल पुन्हा सुरू", "उशिरा शुल्क", "विलंब शुल्क",
+    "अंतिम तिथि बढ़ाई", "अंतिम तिथि का विस्तार", "समय सीमा बढ़ाई",
+    "समय-सीमा बढ़ाई", "अवधि विस्तार", "संशोधित अंतिम तिथि",
+    "संशोधित समय-सारणी", "पोर्टल पुनः खोला", "पोर्टल दोबारा खोला",
+)
+
 EXCLUDE = (
     "counselling", "counseling", "admission schedule", "choice filling", "merit list",
     "seat matrix", "neet", "exam centre", "exam center", "student registration",
@@ -83,6 +106,7 @@ EXCLUDE = (
     "stipend", "ph.d", "phd", "candidate", "scholarship", "समुपदेशन",
     "प्रवेश वेळापत्रक", "गुणवत्ता यादी", "परीक्षा केंद्र", "निकाल", "भरती", "पुरस्कार",
 )
+
 PROGRAM = {
     "mbbs": (
         "mbbs", "medical college", "undergraduate medical", "ug medical",
@@ -109,6 +133,7 @@ PROGRAM = {
     ),
 }
 PROGRAM["all"] = tuple(dict.fromkeys(sum(PROGRAM.values(), ())))
+
 PROGRAM_CONTEXT = {"inc", "mnc", "ncahp", "msotpt"}
 GENERAL_HEALTH_AUTHORITIES = {"muhs", "medd", "dmer"}
 GENERAL_INSTITUTIONAL = (
@@ -119,6 +144,15 @@ GENERAL_INSTITUTIONAL = (
     "नवीन महाविद्यालय", "नवीन संस्था", "नवीन अभ्यासक्रम", "प्रवेश क्षमता",
     "संलग्नता", "ना हरकत",
 )
+DEADLINE_SCOPE = tuple(dict.fromkeys(GENERAL_INSTITUTIONAL + (
+    "application", "online application", "submission of application",
+    "submission of applications", "application form", "application forms",
+    "submit proposal", "submission of proposal", "submission of proposals",
+    "permission", "recommendation", "affiliation", "suitability", "recognition",
+    "essentiality", "noc", "registration of institution", "institutional registration",
+    "portal", "window", "late fee", "अर्ज", "आवेदन", "प्रस्ताव सादर",
+    "मान्यता", "परवानगी", "शिफारस", "संलग्नता", "पोर्टल",
+)))
 GENERIC_LINK = {"view", "view details", "details", "read more", "download", "click here", "more"}
 
 
@@ -135,8 +169,37 @@ def any_term(text: str, terms: tuple[str, ...]) -> bool:
     return any(term.casefold() in text for term in terms)
 
 
+def extension_notice(key: str, profile: str, title: str) -> bool:
+    """Return True only for filing-date extensions relevant to the monitored proposals."""
+    text = low(title)
+    if not 8 <= len(text) <= 900 or not any_term(text, EXTENSION_TERMS):
+        return False
+
+    # Student admissions, counselling, examinations and recruitment date changes are not
+    # institutional proposal deadlines and must remain silent.
+    if any_term(text, EXCLUDE):
+        return False
+
+    if any_term(text, PROGRAM[profile]):
+        return True
+
+    # Nursing and allied-health authority pages are already programme-specific. A generic
+    # institutional application extension on those pages may govern the monitored course.
+    if key in PROGRAM_CONTEXT and any_term(text, DEADLINE_SCOPE):
+        return True
+
+    # MUHS and Maharashtra authorities often issue generic Section 64/affiliation/proposal
+    # extension notices covering several health-science programmes together.
+    if key in GENERAL_HEALTH_AUTHORITIES and any_term(text, DEADLINE_SCOPE):
+        return True
+
+    return False
+
+
 def relevant(key: str, profile: str, title: str) -> bool:
     text = low(title)
+    if extension_notice(key, profile, title):
+        return True
     if not 8 <= len(text) <= 800 or not any_term(text, ACTION):
         return False
 
@@ -152,8 +215,9 @@ def relevant(key: str, profile: str, title: str) -> bool:
         strong = (
             "establishment", "new college", "new institution", "new course", "higher course",
             "increase in seats", "increase of seats", "scheme", "proposal", "suitability",
-            "permission", "affiliation", "essentiality", "extension", "नवीन महाविद्यालय",
-            "नवीन अभ्यासक्रम", "प्रस्ताव", "मान्यता", "परवानगी", "संलग्नता", "मुदतवाढ",
+            "permission", "affiliation", "essentiality", "extension", "reopening",
+            "नवीन महाविद्यालय", "नवीन अभ्यासक्रम", "प्रस्ताव", "मान्यता",
+            "परवानगी", "संलग्नता", "मुदतवाढ",
         )
         if not any_term(text, strong):
             return False
@@ -259,7 +323,7 @@ def main() -> int:
         "Accept-Language": "en-IN,en;q=0.9",
     })
 
-    new: list[dict[str, str]] = []
+    alerts: dict[tuple[str, str, str], dict[str, str]] = {}
     successful_sources = 0
     now = datetime.now().astimezone()
 
@@ -283,20 +347,34 @@ def main() -> int:
         for title, url in raw:
             if relevant(key, profile, title):
                 ident = fingerprint(key, title, url)
-                found.setdefault(ident, {"fingerprint": ident, "title": title, "url": url})
+                kind = "Deadline extension / reopening / corrigendum" if extension_notice(
+                    key, profile, title
+                ) else "New application / permission notice"
+                found.setdefault(
+                    ident,
+                    {"fingerprint": ident, "title": title, "url": url, "kind": kind},
+                )
 
         previous = set(state["seen"].get(key, []))
         if state["initialized"].get(key):
             for ident, item in found.items():
                 if ident not in previous:
-                    new.append({**item, "source": name})
+                    alerts[(name, item["title"], item["url"])] = {**item, "source": name}
         else:
             state["initialized"][key] = True
             print(f"BASELINE: {name}: {len(found)} matching item(s)")
 
         state["seen"][key] = list(dict.fromkeys([*previous, *found.keys()]))[-3000:]
         state["last_checked"][key] = now.isoformat()
-        print(f"CHECKED: {name}: {len(found)} matching, {len(set(found) - previous) if previous else 0} new")
+        extension_count = sum(
+            1 for item in found.values()
+            if item["kind"] == "Deadline extension / reopening / corrigendum"
+        )
+        print(
+            f"CHECKED: {name}: {len(found)} matching "
+            f"({extension_count} extension/reopening), "
+            f"{len(set(found) - previous) if previous else 0} new"
+        )
 
     if not successful_sources:
         output("has_alert", "false")
@@ -305,26 +383,45 @@ def main() -> int:
 
     STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    new = list(alerts.values())
     if new:
+        extension_total = sum(
+            1 for item in new
+            if item["kind"] == "Deadline extension / reopening / corrigendum"
+        )
+        heading = (
+            "## Official deadline extension or reopening detected"
+            if extension_total == len(new)
+            else "## New official regulatory announcement detected"
+        )
         lines = [
-            "## New official regulatory announcement detected", "",
+            heading, "",
             f"**Checked:** {now.strftime('%d %B %Y, %I:%M %p %Z')}", "",
         ]
         for item in new:
             title, url = item["title"], item["url"]
             lines.append(f"### [{title}]({url})" if url else f"### {title}")
-            lines.extend((f"- **Official source:** {item['source']}", ""))
+            lines.extend((
+                f"- **Alert type:** {item['kind']}",
+                f"- **Official source:** {item['source']}",
+                "",
+            ))
         lines.extend((
-            "Open the official notice and verify the academic year, exact last date, fees, documents, portal, and any later corrigendum or extension before filing.",
-            "", "This alert contains only publicly issued regulatory information and no institutional case documents.",
+            "Open the official notice and verify the academic year, original last date, "
+            "extended/revised last date, late-fee period, fees, documents, portal and any "
+            "later corrigendum before filing.",
+            "",
+            "This alert contains only publicly issued regulatory information and no institutional case documents.",
         ))
         ALERT.write_text("\n".join(lines) + "\n", encoding="utf-8")
         output("has_alert", "true")
         output("alert_count", str(len(new)))
+        output("extension_alert_count", str(extension_total))
     else:
         output("has_alert", "false")
         output("alert_count", "0")
-        print("No new relevant announcement.")
+        output("extension_alert_count", "0")
+        print("No new relevant announcement or deadline extension.")
     return 0
 
 
