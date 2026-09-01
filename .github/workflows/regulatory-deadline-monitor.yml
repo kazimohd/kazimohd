@@ -2,7 +2,7 @@ name: Regulatory deadline monitor
 
 on:
   schedule:
-    # 13:30 UTC = 7:00 PM Asia/Kolkata. A date gate below limits this to every two days.
+    # 13:30 UTC = 7:00 PM Asia/Kolkata. A UTC date gate below limits this to every two days.
     - cron: "30 13 * * *"
   workflow_dispatch:
   push:
@@ -34,16 +34,20 @@ jobs:
         id: cadence
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          # Manual runs and monitor-code changes must always perform a real check.
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # GitHub may start a 7 PM IST cron several hours late, sometimes after
+          # midnight in India. Anchor the two-day gate to the UTC cron date so a
+          # delayed run is not incorrectly skipped.
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          from datetime import date, datetime
-          from zoneinfo import ZoneInfo
+          from datetime import date, datetime, timezone
           start = date(2026, 8, 29)
-          today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-          print(f"run={'true' if (today-start).days >= 0 and (today-start).days % 2 == 0 else 'false'}")
+          scheduled_utc_date = datetime.now(timezone.utc).date()
+          days = (scheduled_utc_date - start).days
+          print(f"run={'true' if days >= 0 and days % 2 == 0 else 'false'}")
           PY
 
       - name: Set up Python
